@@ -1,20 +1,28 @@
 #we start by importing our library
 
+import numpy as np
+import pandas as pd
 import requests
 from dagster_essentials.assets import constants
 import dagster as dg
-
-import duckdb
+#import duckdb
+from dagster_duckdb import DuckDBResource
 import os
-from dagster._utils.backoff import backoff
+#from dagster._utils.backoff import backoff
+from dagster_essentials.partitions import monthly_partitions, weekly_partitions  
 
 #now we define our first function with no input and returns nothing
-@dg.asset
-def taxi_trips_file() -> None:
+@dg.asset(
+    partitions_def=monthly_partitions,
+)
+def taxi_trips_file(context: dg.AssetExecutionContext) -> None:
     """
         The raw parquet files for our taxi trip dataset. Sourced from the NYC open data portal.
     """
-    month_to_fetch = '2023-03'
+    partition_date_str = context.partition_key
+    month_to_fetch = partition_date_str[:-3]
+    #month_to_fetch = monthly_partitions.get_partition_key_from_datetime(
+    #    pd.Timestamp.now(tz="America/New_York"))
     raw_trips = requests.get (
         f"https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_{month_to_fetch}.parquet"
 
@@ -22,6 +30,7 @@ def taxi_trips_file() -> None:
 
     with open(constants.TAXI_TRIPS_TEMPLATE_FILE_PATH.format(month_to_fetch), "wb") as output_file:
         output_file.write(raw_trips.content)
+
 
 
 @dg.asset
@@ -39,42 +48,14 @@ def taxi_zones_file() -> None:
         output_file.write(raw_taxi_zones.content)
 
 
-@dg.asset
-
-def ai_adopt() -> None:
-
-    url = ("https://www.kaggle.com/datasets/dakshbhatnagar08/ai-tools-usage-among-global-high-school-students/ai_adoption_by_country.csv/download")
-    response = requests.get(url)
-
-    if response.status_code != 200:
-        print (f'error: {response.status_code}')
-    else:
-        with open('data/raw/ai_data_by_country.csv', "wb") as output_file:
-            output_file.write(response.content)
-
-
-@dg.asset
-
-def ai_adoption() -> None:
-
-    """
-    here i write my script to extract data from kaggle website
-    """
-
-    url = "https://www.kaggle.com/datasets/dakshbhatnagar08/ai_adoption_by_country.csv/download"
-    response = requests.get(url)
-
-    if response.status_code != 200:
-        print(f"error, read error code, {response.status_code}")
-    else:
-        with open(constants.AI_ADOPTION_FILE_PATH, "wb") as output_file:
-            output_file.write(response.content)
+#here we define our asset that will load the taxi trip data into our database
 
 @dg.asset (
-    deps = ["taxi_trips_file"]
+    deps = ["taxi_trips_file"],
+    #required_resource_keys={"database"}
 )
 
-def taxi_trips() -> None:
+def taxi_trips(database: DuckDBResource) -> None:
     """
     here we load our taxi trip data into our db, duckdb as in this instance
     """
@@ -95,44 +76,48 @@ def taxi_trips() -> None:
             );
     """
 
-    conn = backoff(
-        fn=duckdb.connect,
-        retry_on=(RuntimeError, duckdb.IOException),
-        kwargs={
-            "database": os.getenv("DUCKDB_DATABASE"),
-        },
-        max_retries= 10,
-    )
-    conn.execute(query)
+    with database.get_connection() as conn: 
+         conn.execute(query)
 
+    #conn = backoff(
+     #   fn=duckdb.connect,
+      #  retry_on=(RuntimeError, duckdb.IOException),
+       # kwargs={
+        #    "database": os.getenv("DUCKDB_DATABASE"),
+        #},
+        #max_retries= 10,
+    #)
+    #conn.execute(query)
 
+# this asset will load the taxi zone data into our db, duckdb as in this instance
 
-    @dg.asset(
+@dg.asset(
         deps = ["taxi_zones_file"]
+        #required_resource_keys={"database"}
          )    
-    def zones() -> None:
+def zones(database: DuckDBResource) -> None:
 
         query = """
-            replace or select table zones as(
+            create or replace table zones as(
                 select
                     LocationID as zone_id,
                     zone as zone,
                     borough as borough,
                     the_geom as geometry
-                from '{constants.TAXI_ZONES_FILE_PATH}'
+                from 'data/raw/taxi_zones.csv'
 
             );
         """
-
-        conn = backoff(
-            fn = duckdb.connect,
-            retry_on=(RuntimeError, duckdb.IOException),
-            kwargs={
-                "database": os.getenv("DUCKDB"),
-            },
-            max_retries= 10,
-        )
-        conn.execute(query)
-
+        with database.get_connection() as conn:
+            conn.execute(query)
+        #conn = backoff(
+         #   fn = duckdb.connect,
+          #  retry_on=(RuntimeError, duckdb.IOException),
+           # kwargs={
+            #    "database": os.getenv("DUCKDB_DATABASE"),
+            #},
+            #max_retries= 10,
+        #)
+        #conn.execute(query)
 
 
